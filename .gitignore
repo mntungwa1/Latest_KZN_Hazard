@@ -1,0 +1,43 @@
+# Virtual environment
+venv/
+ENV/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+
+# Compiled files
+*.pyd
+*.so
+
+# Project-specific files
+*.zip
+*.docx
+*.pdf
+*.xlsx
+*.csv
+
+# IDE settings
+.vscode/
+.idea/
+
+# Streamlit specific
+.streamlit/
+
+# Environment files
+.env
+.env.*
+
+# Response folders
+Responses/

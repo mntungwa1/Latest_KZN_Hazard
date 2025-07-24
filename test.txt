@@ -1,0 +1,3 @@
+cd C:\tmp\KZN\activate
+
+venv\Scripts\activate
