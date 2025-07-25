@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point
-from streamlit_folium import st_folium
 import folium
-import json
+from streamlit_folium import st_folium
+from shapely.geometry import Point
 from pathlib import Path
 from datetime import datetime, date
 import os, smtplib, re, zipfile
@@ -12,18 +11,15 @@ from email.message import EmailMessage
 from docx import Document
 from fpdf import FPDF
 
-# --- Import hazard and capacity questions ---
-from questions import questions_with_descriptions, capacity_questions, capacity_options
-
-# --- Configuration ---
+# ----------------- CONFIG -----------------
 BASE_DIR = Path("C:/Temp/kzn")
 SAVE_DIR = BASE_DIR / "Responses"
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_CSV = BASE_DIR / "all_submissions.csv"
 EXCEL_PATH = Path("RiskAssessmentTool.xlsm")
-TOPOJSON_PATH = Path("KZN_wards_topo.json")
+GEOJSON_PATH = Path("KZN_wards.geojson")
 
-# --- Load from Streamlit Secrets ---
+# ----------------- SECRETS -----------------
 EMAIL_ADDRESS = st.secrets.get("EMAIL_ADDRESS", "")
 EMAIL_PASSWORD = st.secrets.get("EMAIL_PASSWORD", "")
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "kzn!23@")
@@ -33,18 +29,17 @@ ADMIN_EMAILS = [st.secrets.get("ADMIN_EMAIL", EMAIL_ADDRESS), "dingaanm@gmail.co
 LOGO_PATH = "Logo.png"
 SRK_LOGO_PATH = "SRK_Logo.png"
 
-
-# --- Setup ---
+# ----------------- UTILS -----------------
 def ensure_save_dir():
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     MASTER_CSV.parent.mkdir(parents=True, exist_ok=True)
 
-ensure_save_dir()
-
 def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9_-]', '_', name)
 
-# --- Authentication ---
+ensure_save_dir()
+
+# ----------------- AUTH -----------------
 def password_protection():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -62,27 +57,21 @@ if not st.session_state.get("authenticated", False):
     password_protection()
     st.stop()
 
-# --- Load Hazards ---
+# ----------------- DATA LOAD -----------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_hazards():
     df = pd.read_excel(EXCEL_PATH, sheet_name="Hazard information", skiprows=1)
     return df.iloc[:, 0].dropna().tolist()
 
-# --- Display Map with TopoJSON ---
-def display_map():
-    m = folium.Map(location=[-29.5, 31.1], zoom_start=7)
-    with open(TOPOJSON_PATH, "r", encoding="utf-8") as f:
-        topo_data = json.load(f)
-    folium.TopoJson(
-        data=topo_data,
-        object_path="objects.KZN_wards",
-        style_function=lambda x: {"fillColor": "#3186cc", "color": "black", "weight": 1, "fillOpacity": 0.4},
-        highlight_function=lambda x: {"fillColor": "#ffcc00", "color": "black", "weight": 2, "fillOpacity": 0.7},
-        tooltip=folium.GeoJsonTooltip(fields=["UID"], aliases=["UID:"], sticky=True)
-    ).add_to(m)
-    return st_folium(m, height=1000, width=1200)
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_ward_gdf():
+    try:
+        return gpd.read_file(GEOJSON_PATH).to_crs(epsg=4326)
+    except Exception as e:
+        st.error(f"Failed to load GeoJSON: {e}")
+        st.stop()
 
-# --- Email Sending ---
+# ----------------- EMAIL -----------------
 def send_email(subject, body, to_emails, attachments):
     try:
         msg = EmailMessage()
@@ -92,8 +81,8 @@ def send_email(subject, body, to_emails, attachments):
         msg.set_content(body)
         for attachment in attachments:
             with open(attachment, "rb") as f:
-                file_data = f.read()
-                msg.add_attachment(file_data, maintype="application", subtype="octet-stream", filename=Path(attachment).name)
+                msg.add_attachment(f.read(), maintype="application",
+                                   subtype="octet-stream", filename=Path(attachment).name)
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             smtp.send_message(msg)
@@ -101,7 +90,7 @@ def send_email(subject, body, to_emails, attachments):
     except Exception as e:
         st.error(f"Failed to send email: {e}")
 
-# --- Save Responses ---
+# ----------------- SAVE RESPONSES -----------------
 def append_to_master_csv(df):
     df.to_csv(MASTER_CSV, mode="a", header=not MASTER_CSV.exists(), index=False)
 
@@ -118,7 +107,7 @@ def save_responses(responses, name, ward, email, date_filled,
     df.insert(0, "Respondent Name", name)
     df.insert(1, "District Municipality", district_municipality)
     df.insert(2, "Local Municipality", local_municipality)
-    df.insert(3, "Ward", ward)
+    df.insert(3, "UID", ward)
     df.insert(4, "Email", email)
     df.insert(5, "Extra Info", extra_info)
     df.insert(6, "Date", date_filled)
@@ -131,11 +120,10 @@ def save_responses(responses, name, ward, email, date_filled,
     doc.add_paragraph(f"Name: {name}")
     doc.add_paragraph(f"District Municipality: {district_municipality}")
     doc.add_paragraph(f"Local Municipality: {local_municipality}")
-    doc.add_paragraph(f"Ward: {ward}")
+    doc.add_paragraph(f"UID: {ward}")
     doc.add_paragraph(f"Email: {email}")
     doc.add_paragraph(f"Extra Info: {extra_info}")
     doc.add_paragraph(f"Date: {date_filled}")
-    doc.add_paragraph("---")
     for _, row in df.iterrows():
         doc.add_paragraph(f"Hazard: {row['Hazard']} | Question: {row['Question']} | Response: {row['Response']}")
     doc.save(docx_path)
@@ -147,11 +135,8 @@ def save_responses(responses, name, ward, email, date_filled,
     pdf.cell(200, 10, txt="KZN Hazard Risk Assessment Survey", ln=True, align="C")
     pdf.set_font("Arial", size=12)
     pdf.cell(200, 10, txt=f"Name: {name}", ln=True)
-    pdf.cell(200, 10, txt=f"District Municipality: {district_municipality}", ln=True)
-    pdf.cell(200, 10, txt=f"Local Municipality: {local_municipality}", ln=True)
-    pdf.cell(200, 10, txt=f"Ward: {ward}", ln=True)
+    pdf.cell(200, 10, txt=f"UID: {ward}", ln=True)
     pdf.cell(200, 10, txt=f"Email: {email}", ln=True)
-    pdf.multi_cell(0, 10, txt=f"Extra Info: {extra_info}")
     pdf.cell(200, 10, txt=f"Date: {date_filled}", ln=True)
     pdf.ln(5)
     for _, row in df.iterrows():
@@ -160,7 +145,57 @@ def save_responses(responses, name, ward, email, date_filled,
 
     return csv_path, docx_path, pdf_path
 
-# --- Build Hazard Questions ---
+def create_zip(local_municipality, files):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_name = f"{safe_filename(local_municipality)}_{timestamp}.zip"
+    zip_path = SAVE_DIR / zip_name
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        for file in files:
+            zipf.write(file, os.path.basename(file))
+    return zip_path
+
+# ----------------- QUESTIONS -----------------
+questions_with_descriptions = {
+    "Has this hazard occurred in the past?": [
+        "0 - Has not occurred and has no chance of occurrence",
+        "1 - Has not occurred but there is real potential for occurrence",
+        "2 - Has occurred but only once",
+        "3 - Has occurred but only a few times or rarely",
+        "4 - Has occurred regularly or at least once a year",
+        "5 - Occurs multiple times during a single year",
+    ],
+    "How frequently does it occur?": [
+        "0 - Unknown / Not applicable",
+        "1 - Decreasing",
+        "2 - Stable",
+        "3 - Marginally increasing",
+        "4 - Increasing",
+        "5 - Increasing rapidly",
+    ],
+    # Add all remaining hazard questions here...
+}
+
+capacity_questions = [
+    "Sufficient staff/human resources",
+    "Experience and special knowledge",
+    "Equipment availability",
+    "Adequate funding/budget allocation",
+    "Facilities and infrastructure for response",
+    "Prevention and mitigation plans",
+    "Response and recovery plans",
+    "Community awareness and training programs",
+    "Early warning systems in place",
+    "Coordination with local authorities and partners",
+]
+
+capacity_options = [
+    "Strongly Disagree",
+    "Disagree",
+    "Neutral",
+    "Agree",
+    "Strongly Agree",
+]
+
 def build_hazard_questions(hazards_to_ask):
     responses = []
     for hazard in hazards_to_ask:
@@ -173,20 +208,37 @@ def build_hazard_questions(hazards_to_ask):
             responses.append({"Hazard": hazard, "Question": cq, "Response": response})
     return responses
 
-# --- Survey ---
+# ----------------- MAP DISPLAY -----------------
+def display_map():
+    gdf = load_ward_gdf()
+    m = folium.Map(location=[-29.5, 31.1], zoom_start=7)
+    folium.GeoJson(
+        data=gdf.__geo_interface__,
+        style_function=lambda x: {"fillColor": "#3186cc", "color": "black", "weight": 1, "fillOpacity": 0.4},
+        highlight_function=lambda x: {"fillColor": "#ffcc00", "color": "black", "weight": 2, "fillOpacity": 0.7},
+        tooltip=folium.GeoJsonTooltip(fields=["UID"], aliases=["UID:"], sticky=True)
+    ).add_to(m)
+    return st_folium(m, height=700, width=1000)
+
+# ----------------- SURVEY -----------------
 def run_survey():
     st.title("KZN Hazard Risk Assessment Survey")
     hazards = load_hazards()
     map_data = display_map()
 
     clicked_ward = None
-    if map_data.get("last_active_drawing") or map_data.get("last_clicked"):
-        clicked_ward = map_data.get("last_active_drawing") or map_data.get("last_clicked")
-        st.session_state["selected_ward"] = clicked_ward
+    if map_data.get("last_clicked"):
+        pt = Point(map_data["last_clicked"]["lng"], map_data["last_clicked"]["lat"])
+        gdf = load_ward_gdf()
+        for _, row in gdf.iterrows():
+            if row.geometry.contains(pt):
+                clicked_ward = row["UID"]
+                st.session_state["selected_ward"] = clicked_ward
+                break
 
     ward_display = st.session_state.get("selected_ward", "")
     if ward_display:
-        st.success(f"Selected UID (Ward): {ward_display}")
+        st.success(f"Selected UID: {ward_display}")
 
     st.subheader("Select Applicable Hazards")
     selected = st.multiselect("Choose hazards:", hazards)
@@ -201,7 +253,7 @@ def run_survey():
             st.session_state["name"] = st.text_input("Full Name", st.session_state.get("name", ""))
             st.session_state["district_municipality"] = st.text_input("District Municipality", st.session_state.get("district_municipality", ""))
             st.session_state["local_municipality"] = st.text_input("Local Municipality", st.session_state.get("local_municipality", ""))
-            st.session_state["final_ward"] = ward_display or st.text_input("UID (Ward)", st.session_state.get("final_ward", ""))
+            st.session_state["final_ward"] = ward_display or st.text_input("UID (if not using map)", st.session_state.get("final_ward", ""))
             st.session_state["today"] = st.date_input("Date", value=st.session_state.get("today", date.today()))
             st.session_state["user_email"] = st.text_input("Your Email", st.session_state.get("user_email", ""))
             st.session_state["extra_info"] = st.text_area("Any extra information to be added", st.session_state.get("extra_info", ""))
@@ -225,7 +277,7 @@ def run_survey():
                     st.rerun()
                 if submit:
                     if not st.session_state.get("name") or not st.session_state.get("final_ward"):
-                        st.error("Please fill in your name and ward.")
+                        st.error("Please fill in your name and UID.")
                     else:
                         csv_file, doc_file, pdf_file = save_responses(
                             responses,
@@ -237,14 +289,11 @@ def run_survey():
                             st.session_state["local_municipality"],
                             st.session_state["extra_info"]
                         )
-                        zip_file = SAVE_DIR / f"{safe_filename(st.session_state['local_municipality'])}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-                        with zipfile.ZipFile(zip_file, "w") as zipf:
-                            for file in [csv_file, doc_file, pdf_file]:
-                                zipf.write(file, os.path.basename(file))
+                        zip_file = create_zip(st.session_state["local_municipality"], [csv_file, doc_file, pdf_file])
                         st.session_state["files_saved"] = (csv_file, doc_file, pdf_file, zip_file)
                         st.success(f"Survey submitted successfully! Files saved in: {SAVE_DIR}")
 
-                        # Send ZIP via Email
+                        # Email
                         if st.session_state["user_email"]:
                             send_email(
                                 "Your KZN Hazard Survey Submission",
@@ -259,7 +308,6 @@ def run_survey():
                             [zip_file]
                         )
 
-        # Show download buttons outside the form
         if "files_saved" in st.session_state:
             csv_file, doc_file, pdf_file, zip_file = st.session_state["files_saved"]
             with open(csv_file, "rb") as f:
@@ -272,7 +320,7 @@ def run_survey():
             with open(zip_file, "rb") as zf:
                 st.download_button("Download All (ZIP)", zf, file_name=os.path.basename(zip_file), mime="application/zip")
 
-# --- Main App ---
+# ----------------- MAIN -----------------
 st.set_page_config(page_title="KZN Hazard Risk Assessment", layout="wide")
 st.markdown("<style>div.block-container{padding-top: 1rem;}</style>", unsafe_allow_html=True)
 
