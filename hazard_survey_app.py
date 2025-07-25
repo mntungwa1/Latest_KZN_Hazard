@@ -4,6 +4,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 from streamlit_folium import st_folium
 import folium
+import json
 from pathlib import Path
 from datetime import datetime, date
 import os, smtplib, re, zipfile
@@ -11,7 +12,7 @@ from email.message import EmailMessage
 from docx import Document
 from fpdf import FPDF
 
-# Import hazard & capacity questions
+# --- Import hazard and capacity questions ---
 from questions import questions_with_descriptions, capacity_questions, capacity_options
 
 # --- Configuration ---
@@ -20,7 +21,7 @@ SAVE_DIR = BASE_DIR / "Responses"
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_CSV = BASE_DIR / "all_submissions.csv"
 EXCEL_PATH = Path("RiskAssessmentTool.xlsm")
-GEOJSON_PATH = Path("KZN_wards_topo.json")  # Use TopoJSON
+TOPOJSON_PATH = Path("KZN_wards_topo.json")
 
 # --- Load from Streamlit Secrets ---
 EMAIL_ADDRESS = st.secrets.get("EMAIL_ADDRESS", "")
@@ -31,6 +32,7 @@ ADMIN_EMAILS = [st.secrets.get("ADMIN_EMAIL", EMAIL_ADDRESS), "dingaanm@gmail.co
 
 LOGO_PATH = "Logo.png"
 SRK_LOGO_PATH = "SRK_Logo.png"
+
 
 # --- Setup ---
 def ensure_save_dir():
@@ -66,11 +68,19 @@ def load_hazards():
     df = pd.read_excel(EXCEL_PATH, sheet_name="Hazard information", skiprows=1)
     return df.iloc[:, 0].dropna().tolist()
 
-# --- Load Wards (TopoJSON) ---
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_topojson():
-    with open(GEOJSON_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+# --- Display Map with TopoJSON ---
+def display_map():
+    m = folium.Map(location=[-29.5, 31.1], zoom_start=7)
+    with open(TOPOJSON_PATH, "r", encoding="utf-8") as f:
+        topo_data = json.load(f)
+    folium.TopoJson(
+        data=topo_data,
+        object_path="objects.KZN_wards",
+        style_function=lambda x: {"fillColor": "#3186cc", "color": "black", "weight": 1, "fillOpacity": 0.4},
+        highlight_function=lambda x: {"fillColor": "#ffcc00", "color": "black", "weight": 2, "fillOpacity": 0.7},
+        tooltip=folium.GeoJsonTooltip(fields=["UID"], aliases=["UID:"], sticky=True)
+    ).add_to(m)
+    return st_folium(m, height=1000, width=1200)
 
 # --- Email Sending ---
 def send_email(subject, body, to_emails, attachments):
@@ -150,16 +160,6 @@ def save_responses(responses, name, ward, email, date_filled,
 
     return csv_path, docx_path, pdf_path
 
-# --- Create ZIP ---
-def create_zip(local_municipality, files):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_name = f"{safe_filename(local_municipality)}_{timestamp}.zip"
-    zip_path = SAVE_DIR / zip_name
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        for file in files:
-            zipf.write(file, os.path.basename(file))
-    return zip_path
-
 # --- Build Hazard Questions ---
 def build_hazard_questions(hazards_to_ask):
     responses = []
@@ -173,20 +173,6 @@ def build_hazard_questions(hazards_to_ask):
             responses.append({"Hazard": hazard, "Question": cq, "Response": response})
     return responses
 
-# --- Map Display (TopoJSON) ---
-def display_map():
-    m = folium.Map(location=[-29.5, 31.1], zoom_start=7)
-    topo_data = load_topojson()
-    folium.TopoJson(
-        topo_data,
-        object_path="objects.KZN_wards",
-        name="Wards",
-        style_function=lambda x: {"fillColor": "#3186cc", "color": "black", "weight": 1, "fillOpacity": 0.4},
-        highlight_function=lambda x: {"fillColor": "#ffcc00", "color": "black", "weight": 2, "fillOpacity": 0.7},
-        tooltip=folium.GeoJsonTooltip(fields=["UID"], aliases=["Ward:"], sticky=True),
-    ).add_to(m)
-    return st_folium(m, height=800, width=1200)
-
 # --- Survey ---
 def run_survey():
     st.title("KZN Hazard Risk Assessment Survey")
@@ -194,13 +180,13 @@ def run_survey():
     map_data = display_map()
 
     clicked_ward = None
-    if map_data.get("last_clicked"):
-        clicked_ward = map_data["last_clicked"]
+    if map_data.get("last_active_drawing") or map_data.get("last_clicked"):
+        clicked_ward = map_data.get("last_active_drawing") or map_data.get("last_clicked")
         st.session_state["selected_ward"] = clicked_ward
 
     ward_display = st.session_state.get("selected_ward", "")
     if ward_display:
-        st.success(f"Selected Ward: {ward_display}")
+        st.success(f"Selected UID (Ward): {ward_display}")
 
     st.subheader("Select Applicable Hazards")
     selected = st.multiselect("Choose hazards:", hazards)
@@ -215,7 +201,7 @@ def run_survey():
             st.session_state["name"] = st.text_input("Full Name", st.session_state.get("name", ""))
             st.session_state["district_municipality"] = st.text_input("District Municipality", st.session_state.get("district_municipality", ""))
             st.session_state["local_municipality"] = st.text_input("Local Municipality", st.session_state.get("local_municipality", ""))
-            st.session_state["final_ward"] = ward_display or st.text_input("Ward (if not using map)", st.session_state.get("final_ward", ""))
+            st.session_state["final_ward"] = ward_display or st.text_input("UID (Ward)", st.session_state.get("final_ward", ""))
             st.session_state["today"] = st.date_input("Date", value=st.session_state.get("today", date.today()))
             st.session_state["user_email"] = st.text_input("Your Email", st.session_state.get("user_email", ""))
             st.session_state["extra_info"] = st.text_area("Any extra information to be added", st.session_state.get("extra_info", ""))
@@ -251,7 +237,10 @@ def run_survey():
                             st.session_state["local_municipality"],
                             st.session_state["extra_info"]
                         )
-                        zip_file = create_zip(st.session_state["local_municipality"], [csv_file, doc_file, pdf_file])
+                        zip_file = SAVE_DIR / f"{safe_filename(st.session_state['local_municipality'])}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                        with zipfile.ZipFile(zip_file, "w") as zipf:
+                            for file in [csv_file, doc_file, pdf_file]:
+                                zipf.write(file, os.path.basename(file))
                         st.session_state["files_saved"] = (csv_file, doc_file, pdf_file, zip_file)
                         st.success(f"Survey submitted successfully! Files saved in: {SAVE_DIR}")
 
@@ -292,7 +281,6 @@ menu = st.sidebar.radio("Navigation", ["Survey", "Admin Dashboard"])
 if os.path.exists(LOGO_PATH): st.sidebar.image(LOGO_PATH, width=180)
 if os.path.exists(SRK_LOGO_PATH): st.sidebar.image(SRK_LOGO_PATH, width=160)
 
-# Disclaimer
 st.sidebar.markdown(
     "<small><i>Disclaimer: The software is developed by Dingaan Mahlangu and should not be used without prior permission.</i></small>",
     unsafe_allow_html=True
