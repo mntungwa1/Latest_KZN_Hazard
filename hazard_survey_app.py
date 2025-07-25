@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -7,48 +6,39 @@ from streamlit_folium import st_folium
 import folium
 from pathlib import Path
 from datetime import datetime, date
-import os, smtplib, re, zipfile
+import os, smtplib, re, zipfile, json
 from email.message import EmailMessage
 from docx import Document
 from fpdf import FPDF
 
-# ==========================
-# CONFIGURATION
-# ==========================
+# --- Configuration ---
 BASE_DIR = Path("C:/Temp/kzn")
 SAVE_DIR = BASE_DIR / "Responses"
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 MASTER_CSV = BASE_DIR / "all_submissions.csv"
 EXCEL_PATH = Path("RiskAssessmentTool.xlsm")
-TOPOJSON_PATH = Path("KZN_wards_topo.json")
+TOPOJSON_PATH = Path("KZN_wards_topo.json")  # Use TopoJSON
+LOGO_PATH = "Logo.png"
+SRK_LOGO_PATH = "SRK_Logo.png"
 
-# ==========================
-# STREAMLIT SECRETS
-# ==========================
-EMAIL_ADDRESS = st.secrets["EMAIL_ADDRESS"]
-EMAIL_PASSWORD = st.secrets["EMAIL_PASSWORD"]
+# --- Load from Streamlit Secrets ---
+EMAIL_ADDRESS = st.secrets.get("EMAIL_ADDRESS", "")
+EMAIL_PASSWORD = st.secrets.get("EMAIL_PASSWORD", "")
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", "kzn!23@")
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "kzn!23&")
 ADMIN_EMAILS = [st.secrets.get("ADMIN_EMAIL", EMAIL_ADDRESS), "dingaanm@gmail.com"]
 
-LOGO_PATH = "Logo.png"
-SRK_LOGO_PATH = "SRK_Logo.png"
-
-# ==========================
-# UTILITY FUNCTIONS
-# ==========================
+# --- Utility Functions ---
 def ensure_save_dir():
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     MASTER_CSV.parent.mkdir(parents=True, exist_ok=True)
 
-ensure_save_dir()
-
-def safe_filename(name: str) -> str:
+def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9_-]', '_', name)
 
-# ==========================
-# PASSWORD PROTECTION
-# ==========================
+ensure_save_dir()
+
+# --- Authentication ---
 def password_protection():
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
@@ -66,21 +56,13 @@ if not st.session_state.get("authenticated", False):
     password_protection()
     st.stop()
 
-# ==========================
-# LOAD HAZARDS AND WARDS
-# ==========================
+# --- Load Hazards ---
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_hazards():
     df = pd.read_excel(EXCEL_PATH, sheet_name="Hazard information", skiprows=1)
     return df.iloc[:, 0].dropna().tolist()
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_topojson():
-    return TOPOJSON_PATH.read_text()
-
-# ==========================
-# EMAIL SENDING
-# ==========================
+# --- Email Sending ---
 def send_email(subject, body, to_emails, attachments):
     try:
         msg = EmailMessage()
@@ -99,9 +81,7 @@ def send_email(subject, body, to_emails, attachments):
     except Exception as e:
         st.error(f"Failed to send email: {e}")
 
-# ==========================
-# SAVE RESPONSES
-# ==========================
+# --- Save Responses ---
 def append_to_master_csv(df):
     df.to_csv(MASTER_CSV, mode="a", header=not MASTER_CSV.exists(), index=False)
 
@@ -160,9 +140,7 @@ def save_responses(responses, name, ward, email, date_filled,
 
     return csv_path, docx_path, pdf_path
 
-# ==========================
-# CREATE ZIP
-# ==========================
+# --- Create ZIP ---
 def create_zip(local_municipality, files):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_name = f"{safe_filename(local_municipality)}_{timestamp}.zip"
@@ -172,9 +150,7 @@ def create_zip(local_municipality, files):
             zipf.write(file, os.path.basename(file))
     return zip_path
 
-# ==========================
-# HAZARD QUESTIONS
-# ==========================
+# --- Hazard Questions ---
 questions_with_descriptions = {
     "Has this hazard occurred in the past?": [
         "0 - Has not occurred and has no chance of occurrence",
@@ -289,37 +265,37 @@ def build_hazard_questions(hazards_to_ask):
             responses.append({"Hazard": hazard, "Question": cq, "Response": response})
     return responses
 
-# ==========================
-# DISPLAY MAP (UID)
-# ==========================
+# --- Map Display with TopoJSON ---
 def display_map():
+    with open(TOPOJSON_PATH, "r") as f:
+        topo_data = json.load(f)
+    object_name = list(topo_data["objects"].keys())[0]
+
     m = folium.Map(location=[-29.5, 31.1], zoom_start=7)
     folium.TopoJson(
-        data=TOPOJSON_PATH.read_text(),
-        object_path="objects.KZN_wards",
+        data=topo_data,
+        object_path=f"objects.{object_name}",
         style_function=lambda x: {"fillColor": "#3186cc", "color": "black", "weight": 1, "fillOpacity": 0.4},
         highlight_function=lambda x: {"fillColor": "#ffcc00", "color": "black", "weight": 2, "fillOpacity": 0.7},
-        tooltip=folium.GeoJsonTooltip(fields=["UID"], aliases=["Ward:"], sticky=True)
+        tooltip=folium.GeoJsonTooltip(fields=["UID"], aliases=["Ward UID:"], sticky=True)
     ).add_to(m)
     return st_folium(m, height=800, width=1200)
 
-# ==========================
-# SURVEY WORKFLOW
-# ==========================
+# --- Survey ---
 def run_survey():
     st.title("KZN Hazard Risk Assessment Survey")
     hazards = load_hazards()
     map_data = display_map()
 
     clicked_ward = None
-    if map_data.get("last_clicked"):
-        clicked_ward = map_data["last_clicked"].get("UID")
-        if clicked_ward:
-            st.session_state["selected_ward"] = clicked_ward
+    if map_data.get("last_active_drawing"):
+        props = map_data["last_active_drawing"].get("properties", {})
+        clicked_ward = props.get("UID")
+        st.session_state["selected_ward"] = clicked_ward
 
     ward_display = st.session_state.get("selected_ward", "")
     if ward_display:
-        st.success(f"Selected Ward: {ward_display}")
+        st.success(f"Selected Ward UID: {ward_display}")
 
     st.subheader("Select Applicable Hazards")
     selected = st.multiselect("Choose hazards:", hazards)
@@ -402,9 +378,7 @@ def run_survey():
             with open(zip_file, "rb") as zf:
                 st.download_button("Download All (ZIP)", zf, file_name=os.path.basename(zip_file), mime="application/zip")
 
-# ==========================
-# MAIN APP
-# ==========================
+# --- Main App ---
 st.set_page_config(page_title="KZN Hazard Risk Assessment", layout="wide")
 st.markdown("<style>div.block-container{padding-top: 1rem;}</style>", unsafe_allow_html=True)
 
