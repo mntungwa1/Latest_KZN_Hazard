@@ -1,38 +1,26 @@
-import geopandas as gpd
-from topojson import Topology
+import json
 import sys
-import os
+from topojson import Topology
 
 def convert_geojson_to_topojson(input_file, output_file, simplify_factor=0.01):
-    """
-    Convert GeoJSON to TopoJSON with geometry simplification.
-
-    :param input_file: Path to input GeoJSON file.
-    :param output_file: Path to save TopoJSON file.
-    :param simplify_factor: Simplification tolerance (in coordinate units).
-    """
-    if not os.path.exists(input_file):
-        print(f"Error: {input_file} not found.")
-        return
-
     print(f"Reading GeoJSON file: {input_file}")
-    gdf = gpd.read_file(input_file)
-
-    # Simplify geometry using Shapely
-    print(f"Simplifying geometries with tolerance = {simplify_factor}...")
-    gdf["geometry"] = gdf["geometry"].simplify(simplify_factor, preserve_topology=True)
+    with open(input_file, "r", encoding="utf-8") as f:
+        geo_data = json.load(f)
 
     print("Converting to TopoJSON...")
-    topo = Topology(gdf)
+    topo = Topology(geo_data, prequantize=True)
+    
+    if simplify_factor > 0:
+        topo = topo.toposimplify(simplify_factor)
 
-    print(f"Saving TopoJSON to: {output_file}")
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(topo.to_json())
-    print("Conversion completed successfully!")
+    with open(output_file, "w", encoding="utf-8") as out_f:
+        json.dump(topo.to_dict(), out_f)
+
+    print(f"TopoJSON saved as: {output_file}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python simplify_geojson.py <input.geojson> <output.json> [simplify_factor]")
+        print("Usage: python simplify_geojson.py <input_geojson> <output_topojson> [simplify_factor]")
     else:
         input_file = sys.argv[1]
         output_file = sys.argv[2]
