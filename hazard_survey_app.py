@@ -60,6 +60,30 @@ def ensure_save_dir():
 def safe_filename(name):
     return re.sub(r'[^A-Za-z0-9_-]', '_', str(name or ""))
 
+# Break long unspaced tokens to avoid FPDF width errors
+def _safe_break(text, length=80):
+    s = str(text or "")
+    if not s:
+        return s
+    parts, token = [], ""
+    for ch in s:
+        token += ch
+        if len(token) >= length and " " not in token:
+            parts.append(token)
+            token = ""
+        elif ch == " ":
+            parts.append(token)
+            token = ""
+    if token:
+        parts.append(token)
+    fixed = []
+    for p in parts:
+        if len(p) >= length and " " not in p:
+            fixed.extend([p[i:i+length] for i in range(0, len(p), length)])
+        else:
+            fixed.append(p)
+    return " ".join(fixed) if fixed else s
+
 # ----------------- STATE RESET HELPERS -----------------
 def reset_form_state():
     """Clear just the respondent/form-related keys; keep auth and performance prefs."""
@@ -136,6 +160,14 @@ def load_ward_gdf(path):
         gdf.set_crs(epsg=4326, inplace=True)
     else:
         gdf = gdf.to_crs(epsg=4326)
+
+    # Cast tooltip columns to str to avoid JSON encoding issues
+    for c in ["UID", "NAMECODE", "GRID_ID", "MUNICNAME", "DISTRICT_N"]:
+        if c in gdf.columns:
+            try:
+                gdf[c] = gdf[c].astype(str)
+            except Exception:
+                gdf[c] = gdf[c].apply(lambda x: "" if pd.isna(x) else str(x))
 
     # Spatial index: build once and keep (cache_resource persists)
     _ = gdf.sindex
@@ -225,6 +257,28 @@ def get_tooltip_fields(gdf, compact=False):
             aliases.append(label + ":")
             seen.add(col)
     return fields, aliases
+
+# ---- NEW: Build a minimal, serializable FeatureCollection for Folium ----
+def _build_geojson(gdf, fields, use_display_geom=True):
+    """Return a minimal, JSON-serializable FeatureCollection for Folium."""
+    feats = []
+    geom_col = "__geom_display__" if (use_display_geom and "__geom_display__" in gdf.columns) else gdf.geometry.name
+    for _, row in gdf.iterrows():
+        geom = row[geom_col]
+        if geom is None or geom.is_empty:
+            continue
+        props = {}
+        for f in fields:
+            v = row.get(f, "")
+            if pd.isna(v):
+                v = ""
+            props[f] = str(v)
+        feats.append({
+            "type": "Feature",
+            "properties": props,
+            "geometry": geom.__geo_interface__,
+        })
+    return {"type": "FeatureCollection", "features": feats}
 
 # ----------------- EMAIL -----------------
 def send_email(subject, body, to_emails, attachments):
@@ -321,50 +375,42 @@ def save_responses(responses, name, ward_uid, email, date_filled,
         st.warning("DOCX not created (python-docx missing or failed): {}".format(e))
         docx_path = None
 
-    # PDF (robust, lazy import)
+    # PDF (robust, lazy import) - FIXED for long lines & meta
     try:
         from fpdf import FPDF  # fpdf2
         pdf = FPDF()
-        # margins & auto page break
-        pdf.set_margins(12, 12, 12)              # left, top, right (mm)
+        pdf.set_margins(12, 12, 12)
         pdf.set_auto_page_break(auto=True, margin=12)
         pdf.add_page()
 
-        # header
-        pdf.set_font("Arial", "B", 16)           # "Arial" is alias of Helvetica
+        pdf.set_font("Arial", "B", 16)
         pdf.cell(0, 10, txt="KZN Hazard Risk Assessment Survey", ln=True, align="C")
 
         pdf.set_font("Arial", size=11)
         meta_lines = [
-            "Name: {}".format(name),
-            "UID: {}".format(ward_uid),
-            "Ward Name: {}".format(ward_name),
-            "Email: {}".format(email),
-            "Date: {}".format(date_filled),
-            "District Municipality: {}".format(district_municipality),
-            "Local Municipality: {}".format(local_municipality),
-            "Extra Info: {}".format(extra_info),
+            "Name: {}".format(_safe_break(name)),
+            "UID: {}".format(_safe_break(ward_uid)),
+            "Ward Name: {}".format(_safe_break(ward_name)),
+            "Email: {}".format(_safe_break(email)),
+            "Date: {}".format(_safe_break(date_filled)),
+            "District Municipality: {}".format(_safe_break(district_municipality)),
+            "Local Municipality: {}".format(_safe_break(local_municipality)),
+            "Extra Info: {}".format(_safe_break(extra_info)),
         ]
         for line in meta_lines:
-            pdf.cell(0, 8, txt=str(line or ""), ln=True)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 8, txt=str(line or ""))
 
         pdf.ln(2)
-
-        # ensure we start from the left margin before multi_cell
         pdf.set_x(pdf.l_margin)
 
-        # body
         for _, row in df.iterrows():
-            hazard   = str(row.get("Hazard", "") or "")
-            question = str(row.get("Question", "") or "")
-            resp     = str(row.get("Response", "") or "")
-
-            # avoid unbreakable ultra-long tokens: insert spaces every 80 chars as a last resort
-            if len(resp) > 120 and " " not in resp[:120]:
-                resp = " ".join([resp[i:i+80] for i in range(0, len(resp), 80)])
-
+            hazard   = _safe_break(row.get("Hazard", ""))
+            question = _safe_break(row.get("Question", ""))
+            resp     = _safe_break(row.get("Response", ""))
             text = "Hazard: {} | Question: {} | Response: {}".format(hazard, question, resp)
-            pdf.multi_cell(0, 7, txt=text)       # width=0 ⇒ full effective width
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 7, txt=text)
 
         pdf.output(str(pdf_path))
     except Exception as e:
@@ -446,8 +492,12 @@ def display_map(gdf, compact_tooltip=False):
     m = folium.Map(location=[-28.6, 31.0], zoom_start=7)
 
     fields, aliases = get_tooltip_fields(gdf_display, compact=compact_tooltip)
+
+    # Build cleaned, serializable GeoJSON to avoid TypeErrors in Jinja2/json
+    fc = _build_geojson(gdf_display, fields, use_display_geom=True)
+
     gj = folium.GeoJson(
-        data=gdf_display.__geo_interface__,
+        data=fc,
         style_function=lambda x: {"fillColor": "#3186cc", "color": "black", "weight": 1, "fillOpacity": 0.35},
         highlight_function=lambda x: {"fillColor": "#ffcc00", "color": "black", "weight": 2, "fillOpacity": 0.65},
         name="wards",
@@ -559,7 +609,7 @@ def run_survey():
                 st.rerun()
             if cols[2].button("Clear cache (refresh data)"):
                 st.cache_data.clear()
-                st.experimental_rerun()
+                st.rerun()
 
         elif st.session_state.active_tab == "Hazard Risk Evaluation":
             st.subheader("Hazard Risk Evaluation")
@@ -572,7 +622,6 @@ def run_survey():
                 responses_to_save = None
 
                 if use_grid:
-                    # Build a template table
                     rows = []
                     for hz in hazards_to_ask:
                         rows.append({
@@ -638,7 +687,6 @@ def run_survey():
                     if submit:
                         responses_to_save = []
                         for _, r in edited.iterrows():
-                            # Convert the grid back to the same structure as radio-based flow
                             responses_to_save.append({"Hazard": r["Hazard"], "Question": "Has this hazard occurred in the past?", "Response": r["Occurred"]})
                             responses_to_save.append({"Hazard": r["Hazard"], "Question": "How is the trend changing?", "Response": r["Trend"]})
                             for q, col in [
@@ -656,7 +704,6 @@ def run_survey():
                                 responses_to_save.append({"Hazard": r["Hazard"], "Question": q, "Response": r[col]})
 
                 else:
-                    # Original radio-based flow (slower but familiar)
                     responses = build_hazard_questions(hazards_to_ask)
                     col1, col2 = st.columns(2)
                     back = col1.form_submit_button("Back to Respondent Info")
@@ -669,7 +716,6 @@ def run_survey():
                     if submit:
                         responses_to_save = responses
 
-                # Final submission (common)
                 if submit:
                     if not st.session_state.get("name"):
                         st.error("Please fill in your name.")
@@ -691,7 +737,6 @@ def run_survey():
                         st.session_state["files_saved"] = (csv_file, doc_file, pdf_file, zip_file)
                         st.success("Survey submitted successfully! Files saved in: {}".format(SAVE_DIR))
 
-                        # Email receipts
                         if st.session_state["user_email"]:
                             send_email(
                                 "Your KZN Hazard Survey Submission",
@@ -707,7 +752,6 @@ def run_survey():
                                 [zip_file]
                             )
 
-    # Downloads after submission
     if "files_saved" in st.session_state:
         csv_file, doc_file, pdf_file, zip_file = st.session_state["files_saved"]
         st.divider()
@@ -734,7 +778,6 @@ if os.path.exists(LOGO_PATH):
 if os.path.exists(SRK_LOGO_PATH):
     st.sidebar.image(SRK_LOGO_PATH, width=160)
 
-# Performance panel
 with st.sidebar.expander("Performance", expanded=False):
     st.caption("Tune map speed & UI payload")
     tol = st.slider(
@@ -754,7 +797,6 @@ with st.sidebar.expander("Performance", expanded=False):
         st.success("Applied: tol {:.4f}, compact tooltip {}".format(tol, compact))
         st.rerun()
 
-# Environment / versions
 with st.sidebar.expander("Environment", expanded=False):
     st.caption("Runtime versions")
     import sys
@@ -783,16 +825,21 @@ with st.sidebar.expander("Environment", expanded=False):
     st.write("fpdf2", ver("fpdf2"))
     st.write("fpdf", ver("fpdf"))
 
-# Session / reset controls
 with st.sidebar.expander("Session", expanded=False):
     st.caption("Reset form or clear app state")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     if c1.button("New respondent", key="btn_reset_form"):
         reset_form_state()
         st.toast("Form cleared")
         st.rerun()
     if c2.button("Clear ALL state", key="btn_clear_all"):
         clear_all_state()
+    if c3.button("Logout"):
+        st.session_state.pop("authenticated", None)
+        st.session_state.pop("admin_authenticated", None)
+        reset_form_state()
+        st.toast("Logged out")
+        st.rerun()
 
 st.sidebar.markdown(
     "<small><i>Disclaimer: The software is developed by Dingaan Mahlangu and should not be used without prior permission.</i></small>",
